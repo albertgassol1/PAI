@@ -1,0 +1,1 @@
+Apply bayes rule to get each posterior probability. Apply log and rearrange the terms in order to be able to apply the LSE.
