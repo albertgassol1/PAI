@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from sklearn.cluster import KMeans
-from scipy.optimize import minimize, dual_annealing
+import scipy
 from skopt import gp_minimize
 from skopt.space import Real
 from skopt.utils import use_named_args
@@ -48,7 +48,7 @@ class Model(object):
         Initialize your model here.
         We already provide a random number generator for reproducibility.
         """
-        # self.rng = np.random.default_rng(seed=0)
+        self.rng = np.random.default_rng(seed=0)
 
         # TODO: Add custom initialization for your model here if necessary
 
@@ -56,23 +56,18 @@ class Model(object):
         # self.kernel = ConstantKernel() + RBF() + WhiteKernel()
         # self.kernel = RBF(10, (1e-2, 1e2))
         self.kernel = Matern(nu=1.5)
+        # self.kernel = ConstantKernel() + RBF() + WhiteKernel()
         # We use kmeans to reduce number of points, this variable determines the number of n_clusters
-        self.n_clusters = 250
+        self.n_clusters = 450
         self.neighbors = 25
 
-        # Initialize Nystrom transform
-        self.nystrom_map = Nystroem(
-            random_state=1,
-            n_components=1
-        )
-
         # GPR object
-        self.gp = GaussianProcessRegressor(kernel=self.kernel, n_restarts_optimizer=9, normalize_y=True, random_state=0)
+        self.gp = GaussianProcessRegressor(kernel=self.kernel, n_restarts_optimizer=9, normalize_y=True, random_state=10)
 
 
     def preprocess_data(self, train_x: np.ndarray, train_y: np.ndarray):
         data = np.column_stack((train_x, train_y))
-        kmeans = KMeans(n_clusters=self.n_clusters, random_state=0)
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=10)
         kmeans.fit(data)
         k_pred = kmeans.predict(data) 
         dist = kmeans.transform(data)
@@ -85,12 +80,8 @@ class Model(object):
             N = min([len(indices_cluster), self.neighbors])
             for j in range(N):   
                 indices.append(indices_cluster[int(np.argmin(dist[indices_cluster, n]))])
-                indices_cluster = np.delete(indices_cluster, np.argmin(dist[indices_cluster, n]))
+                indices_cluster = np.delete(indices_cluster, np.argmin(dist[indices_cluster, n]))        
 
-
-        
-
-        # return kmeans.cluster_centers_
         return indices
 
     def predict(self, x: np.ndarray) -> typing.Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -110,7 +101,14 @@ class Model(object):
 
         # TODO: Use the GP posterior to form your predictions here
         # predictions = gp_mean
-        predictions = np.where((gp_mean <= THRESHOLD) & (gp_mean + gp_std/2 > THRESHOLD), THRESHOLD, gp_mean)
+        mask1 = ((gp_mean <= THRESHOLD) & (gp_mean + gp_std > THRESHOLD))
+        mask2 = ((gp_mean <= THRESHOLD) & (gp_mean + gp_std  <= THRESHOLD))
+        mask3 = (gp_mean > THRESHOLD)
+
+        predictions = np.zeros_like(gp_mean)
+        predictions[mask1] = THRESHOLD
+        predictions[mask2] = gp_mean[mask2] - gp_std[mask2]/2
+        predictions[mask3] = gp_mean[mask3]
 
         return predictions, gp_mean, gp_std
         
@@ -121,68 +119,37 @@ class Model(object):
         :param train_x: Training features as a 2d NumPy float array of shape (NUM_SAMPLES, 2)
         :param train_y: Training pollution concentrations as a 1d NumPy float array of shape (NUM_SAMPLES,)
         """
-        # Save data
-        self.train_x = train_x
-        self.train_y = train_y
 
         # TODO: Fit your model here
-        # training_data = self.preprocess_data(train_x, train_y)
-        # self.gp.fit(training_data[:, 0:2], training_data[:, -1])
         training_data_indices = self.preprocess_data(train_x, train_y)
+        # Save data
+        self.train_x = train_x[training_data_indices]
+        self.train_y = train_y[training_data_indices]
         self.gp.fit(train_x[training_data_indices], train_y[training_data_indices])
-        # self.gp.fit(training_data[:, 0:2], training_data[:, -1])
 
         # Minimize cost function to obtein hyperparameters
-        # theta = minimize(self.optimization_function, self.gp.kernel_.theta, args=([train_x, train_y]), method='BFGS')
-        
-        # default_parameters = [self.gp.kernel_.theta[0], self.gp.kernel_.theta[1], self.gp.kernel_.theta[2]]
-        # theta = gp_minimize(func=self.optimization_function,
-        #                         dimensions=dimensions,
-        #                         x0=default_parameters)
-        # lb = [-100] * len(hyperparameters)
-        # ub = [100] * len(hyperparameters)
-        # theta = dual_annealing(self.optimization_function_annealing, bounds=list(zip(lb, ub)), x0=hyperparameters)
-        # self.gp.kernel_.theta = theta.x
+        # self.gp.kernel_.theta = self.optimizer()
 
-    # @use_named_args(dimensions=dimensions)
-    def optimization_function(self, k):
-       
-        train_x =self.train_x
-        train_y =self.train_y
-        # self.gp.fit(self.train_x, self.train_y)
-        self.gp.kernel_.theta = [k[0], k[1], k[2]]
-        # self.gp.fit(self.train_x, self.train_y)
-        prediction = self.gp.predict(train_x)
+    def optimizer(self):
+	    initial_theta = self.gp.kernel_.theta
+	    optimalResult = scipy.optimize.minimize(self.obj_func, initial_theta, method='BFGS')
+	    theta_opt = optimalResult.x
+	    return theta_opt
 
-        assert train_y.ndim == 1 and prediction.ndim == 1 and train_y.shape == prediction.shape
-
-        # Unweighted cost
-        cost = (train_y - prediction) ** 2
-        weights = np.zeros_like(cost)
-
-        # Case i): overprediction
-        mask_1 = prediction > train_y
-        weights[mask_1] = COST_W_OVERPREDICT
-
-        # Case ii): true is above threshold, prediction below
-        mask_2 = (train_y >= THRESHOLD) & (prediction < THRESHOLD)
-        weights[mask_2] = COST_W_THRESHOLD
-
-        # Case iii): everything else
-        mask_3 = ~(mask_1 | mask_2)
-        weights[mask_3] = COST_W_NORMAL
-
-        # Weigh the cost and return the average
-        return np.mean(cost * weights)
-
-    def optimization_function_annealing(self, hyperparameters):
-        
-        self.gp.kernel_.theta = hyperparameters
+    def obj_func(self,hyperparams)->float:
+        self.gp.kernel_.theta = hyperparams
         prediction = self.gp.predict(self.train_x)
-        cost = cost_function(self.train_y, prediction)
+        cost = cost_function(self.train_y,prediction)
+        self.gp.kernel_.theta = hyperparams
+        return cost
+    # @use_named_args(dimensions=dimensions)
+    def optimization_function(self, hyperparameters, train):
+       
+        self.gp.kernel_.theta = hyperparameters
+        prediction = self.gp.predict(train[0])
         self.gp.kernel_.theta = hyperparameters
 
-        return cost
+        return cost_function(train[1], prediction)
     
 
 def cost_function(y_true: np.ndarray, y_predicted: np.ndarray) -> float:
