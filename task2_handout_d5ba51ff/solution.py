@@ -63,7 +63,7 @@ class Model(object):
         self.num_epochs = 100  # number of training epochs
         self.batch_size = 128  # training batch size
         learning_rate = 5e-4  # training learning rates
-        hidden_layers = (250, 150)  # for each entry, creates a hidden layer with the corresponding number of units
+        hidden_layers = (400, 400)  # for each entry, creates a hidden layer with the corresponding number of units
         use_densenet = False  # set this to True in order to run a DenseNet for comparison
         self.print_interval = 100  # number of batches until updated metrics are displayed during training
 
@@ -242,6 +242,7 @@ class BayesianLayer(nn.Module):
 
         if self.use_bias:
             bias = self.bias_var_posterior.sample()
+            log_variational_posterior = self.weights_var_posterior.log_likelihood(weights) + bias
         else: bias = None
 
         return F.linear(inputs, weights, bias), log_prior, log_variational_posterior
