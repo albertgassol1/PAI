@@ -28,7 +28,11 @@ class BO_algo(object):
         # Otherwise, the extended evaluation will break.
         self.constraint_model = GP(ConstantKernel(constant_value=3.5)*RBF(length_scale=2))  # TODO : GP model for the constraint function
         self.objective_model = GP(ConstantKernel(constant_value=1.5)*RBF(length_scale=1.5))  # TODO : GP model for your acquisition function
-        self.epoch = -1
+
+        self.x_sample = np.array([]).reshape(-1, domain.shape[0])
+        self.f_sample = []
+        self.c_sample = []
+        self.c_min = 1.2
 
     def next_recommendation(self) -> np.ndarray:
         """
@@ -43,8 +47,9 @@ class BO_algo(object):
         # TODO: enter your code here
         # In implementing this function, you may use optimize_acquisition_function() defined below.
 
-        if not hasattr(self, 'X'):
-            return np.array([[np.random.uniform(0, 6), np.random.uniform(0, 6)]])
+        if self.x_sample.size == 0:
+            x = domain[:, 0] + (domain[:, 1] - domain[:, 0]) * np.random.rand(domain.shape[0])
+            return np.array([x])
         return self.optimize_acquisition_function()
 
     def optimize_acquisition_function(self) -> np.ndarray:  # DON'T MODIFY THIS FUNCTION
@@ -64,15 +69,13 @@ class BO_algo(object):
         x_values = []
 
         # Restarts the optimization 20 times and pick best solution
-        for _ in range(19):
+        for _ in range(20):
             x0 = domain_x[0, 0] + (domain_x[0, 1] - domain_x[0, 0]) * \
                  np.random.rand(1)
             x1 = domain_x[1, 0] + (domain_x[1, 1] - domain_x[1, 0]) * \
                  np.random.rand(1)
-            print(_)
             result = fmin_l_bfgs_b(objective, x0=np.array([x0, x1]), bounds=domain_x,
                                    approx_grad=True)
-            print(_)
             x_values.append(np.clip(result[0], *domain_x[0]))
             f_values.append(result[1])
 
@@ -96,22 +99,26 @@ class BO_algo(object):
 
         # TODO: enter your code here
         # Compute EI
-        if self.epoch <= self.X.shape[0]:
-            self.objective_model.fit(self.X, self.z)
-            self.constraint_model.fit(self.X, self.c)
-            self.epoch = self.X.shape[0]
         mu, sigma = self.objective_model.predict(x.reshape(1, -1), return_std=True)
-        mu_sample = self.objective_model.predict(self.X)
-        z = (mu - mu_sample) / sigma
+        mu_sample = self.objective_model.predict(self.x_sample)
+        sigma = sigma.reshape(-1, 1)
+        mu_sample_opt = np.max(mu_sample)
+        z = (mu - mu_sample_opt) / sigma
         psi = norm.cdf(z)
         phi = norm.pdf(z)
         ei = sigma * (z*psi + psi)
+        ei[sigma == 0.0] = 0
 
         # Add constraint weighting
         mu_c, sigma_c = self.constraint_model.predict(x.reshape(1, -1), return_std=True)
-        pr_c = mvn.cdf(x, mean=np.squeeze(np.matlib.repmat(mu_c[0], 1, x.shape[0])), cov=numpy.eye(x.shape[0])*sigma_c)
+        if sigma_c != 0:
+            pr_c = 1 - norm.cdf(self.c_min, loc=mu_c, scale=sigma_c)
+        else:
+            pr_c = 0.95 * (mu_c - self.c_min) if mu_c >= self.c_min else 0.05 * (self.c_min - mu_c)
+        #pr_c = mvn.cdf(x, mean=np.squeeze(np.matlib.repmat(mu_c[0], 1, x.shape[0])), cov=numpy.eye(x.shape[0])*sigma_c)
 
-        return np.squeeze(ei)*pr_c
+        #        return np.squeeze(ei)*pr_c
+        return np.squeeze(ei)*np.squeeze(pr_c)
 
     def add_data_point(self, x: np.ndarray, z: float, c: float):
         """
@@ -129,20 +136,22 @@ class BO_algo(object):
 
         assert x.shape == (1, 2)
         self.previous_points.append([float(x[:, 0]), float(x[:, 1]), float(z), float(c)])
-        if not hasattr(self, 'X'):
-            print("Starting Job")
-            self.X = x
-        else:
-            self.X = np.vstack((self.X, x))
-        if not hasattr(self, 'z'):
-            self.z = np.array([z])
-        else:
-            self.z = np.vstack((self.z, np.array([z])))
-        if not hasattr(self, 'c'):
-            self.c = np.array([c])
-        else:
-            self.c = np.vstack((self.c, np.array([c])))
         # TODO: enter your code here
+
+        self.x_sample = np.vstack((self.x_sample, x))
+
+        if len(self.f_sample) == 0:
+            self.f_sample = z
+        else:
+            self.f_sample = np.vstack((self.f_sample, z))
+
+        if len(self.c_sample) == 0:
+            self.c_sample = c
+        else:
+            self.c_sample = np.vstack((self.c_sample, c))
+
+        self.objective_model.fit(self.x_sample, self.f_sample)
+        self.constraint_model.fit(self.x_sample, self.c_sample)
 
     def get_solution(self) -> np.ndarray:
         """
@@ -155,14 +164,10 @@ class BO_algo(object):
         """
 
         # TODO: enter your code here
-        x_values = np.linspace(domain[:, 0], domain[:, 1], num=1000)
-        f_values = np.zeros(x_values.shape)
-        for i, x in enumerate(x_values):
-            if self.epoch < self.X.shape[0]:
-                self.objective_model.fit(self.X, self.z)
-            f_values[i] = self.objective_model.predict(x)
-        ind = np.argmax(f_values)
-        return np.atleast_2d(x_values[ind])
+        valid_samples = self.f_sample
+        valid_samples[self.c_sample < 1.2] = -1e6
+        best_index = np.argmax(valid_samples)
+        return self.x_sample[best_index]
 
 
 """ 
