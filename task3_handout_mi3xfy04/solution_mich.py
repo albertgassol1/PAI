@@ -3,13 +3,11 @@ import os
 import typing
 import logging
 import numpy as np
-import numpy.matlib
 from scipy.optimize import fmin_l_bfgs_b
-from sklearn.gaussian_process import GaussianProcessRegressor as GP
-from sklearn.gaussian_process.kernels import ConstantKernel, RBF
 import matplotlib.pyplot as plt
+from sklearn.gaussian_process.kernels import ConstantKernel, RBF, Sum, WhiteKernel
+from sklearn.gaussian_process import GaussianProcessRegressor
 from scipy.stats import norm
-from scipy.stats import multivariate_normal as mvn
 
 EXTENDED_EVALUATION = False
 # Set `EXTENDED_EVALUATION` to `True` in order to visualize your predictions.
@@ -17,24 +15,39 @@ EXTENDED_EVALUATION = False
 
 """ Solution """
 
-domain = np.array([[0, 6], [0, 6]])
+
 class BO_algo(object):
     def __init__(self):
         """Initializes the algorithm with a parameter configuration. """
 
+        # TODO: enter your code here
         self.previous_points = []
         # IMPORTANT: DO NOT REMOVE THOSE ATTRIBUTES AND USE sklearn.gaussian_process.GaussianProcessRegressor instances!
         # Otherwise, the extended evaluation will break.
-        self.constraint_model = GP(kernel=ConstantKernel(constant_value=3.5)*RBF(length_scale=2), alpha=0.005**2)
-        self.objective_model = GP(kernel=ConstantKernel(constant_value=1.5)*RBF(length_scale=1.5), alpha=0.01**2)
 
-        # We save the sampled x, f and c in this variables
-        self.x = np.array([]).reshape(-1, domain.shape[0])
-        self.f = []
-        self.c = []
 
-        # c' < TH, in our case it is 0
-        self.c_th = 0
+        # Set up the GPs for constraint and objective functions
+
+        self.constraint_covar = ConstantKernel(3.5) * RBF(2.0)
+        self.constraint_model = GaussianProcessRegressor(kernel = self.constraint_covar, alpha = 0.005)#**2) # TODO : GP model for the constraint function
+        self.objective_covar = ConstantKernel(1.5) * RBF(1.5)  # TODO : GP model for your objective function
+        self.objective_model = GaussianProcessRegressor(kernel = self.objective_covar, alpha = 0.01)#**2)
+
+
+        # Get a first, random, sample of f and c as initialization - maybe put some more random samples?
+        np.random.seed(1234)
+        self.x_sample = np.random.rand(1,2) * 6
+        
+        self.f_sample = f(self.x_sample)
+        self.c_sample = c(self.x_sample)
+
+        # Fit the GPs 
+
+        self.objective_model.fit(self.x_sample, self.f_sample)
+        self.constraint_model.fit(self.x_sample, self.c_sample)
+
+
+
 
     def next_recommendation(self) -> np.ndarray:
         """
@@ -46,14 +59,13 @@ class BO_algo(object):
             1 x domain.shape[0] array containing the next point to evaluate
         """
 
-        # In implementing this function, you may use optimize_acquisition_function() defined below.
+        if self.x_sample.size == 0:
+            next_x = np.random.rand(1,2) * 6
+        else:
+            next_x = self.optimize_acquisition_function()
 
-        if self.x.size == 0:
-            # Random sample
-            x = domain[:, 0] + (domain[:, 1] - domain[:, 0]) * np.random.rand(domain.shape[0])
-            return np.array([x])
-        # Optimized sample
-        return self.optimize_acquisition_function()
+        return next_x
+
 
     def optimize_acquisition_function(self) -> np.ndarray:  # DON'T MODIFY THIS FUNCTION
         """
@@ -99,23 +111,29 @@ class BO_algo(object):
         af_value: float
             value of the acquisition function at x
         """
+        mu_f, sigma_f = self.objective_model.predict(x.reshape(1,-1), return_std = True)
+        mu_sample, sigma_sample = self.objective_model.predict(self.x_sample, return_std=True)
 
-        # Compute EI
-        # Get prediction of sample x
-        mu_f, sigma_f = self.objective_model.predict(x.reshape(1, -1), return_std=True)
-        # Predict from previous samples and choose the min of f
-        mu_sample = self.objective_model.predict(self.x)
+
+
+        mu_c, sigma_c = self.constraint_model.predict(x.reshape(1,-1), return_std = True)
+        pf = norm.cdf(0, loc = mu_c, scale = sigma_c)
+
+        if mu_c + 2 * sigma_c > 0:
+            penalty = 1.25
+
+        else:
+            penalty = 0
+
         t = np.min(mu_sample)
-        # Closed EI formula for GPs
-        z = (mu_f - t) / sigma_f
-        psi = norm.cdf(z)
-        phi = norm.pdf(z)
-        ei = sigma_f * (z*psi + phi)
+        z = (mu_f - t)/sigma_f
 
-        # Add constraint weighting
-        mu_c, sigma_c = self.constraint_model.predict(x.reshape(1, -1), return_std=True)
-        pr_c = norm.cdf(self.c_th, loc=mu_c, scale=sigma_c)
-        return np.squeeze(ei)*np.squeeze(pr_c)
+
+        af_value = sigma_f * (z * norm.cdf(z) + norm.pdf(z))
+        af_value = af_value * pf - penalty
+
+        return af_value
+
 
     def add_data_point(self, x: np.ndarray, z: float, c: float):
         """
@@ -126,30 +144,23 @@ class BO_algo(object):
         x: np.ndarray
             point in the domain of f
         z: np.ndarray
-            value of the acquisition function at x
+            value of the objective function at x
         c: np.ndarray
-            value of the condition function at x
+            value of the constraint function at x
         """
 
         assert x.shape == (1, 2)
         self.previous_points.append([float(x[:, 0]), float(x[:, 1]), float(z), float(c)])
 
-        # Save new sample into vector of x
-        self.x = np.vstack((self.x, x))
+        # add x and the evaluations of f and c at x to their arrays and retrain the model
 
-        # Save values of functions and constraints for each x
-        if len(self.f) == 0:
-            self.f = z
-        else:
-            self.f = np.vstack((self.f, z))
+        self.x_sample = np.vstack((self.x_sample, x))
+        self.f_sample = np.vstack((self.f_sample,z))
+        self.c_sample = np.vstack((self.c_sample,c))
 
-        if len(self.c) == 0:
-            self.c = c
-        else:
-            self.c = np.vstack((self.c, c))
-
-        self.objective_model.fit(self.x, self.f)
-        self.constraint_model.fit(self.x, self.c)
+        self.constraint_model.fit(self.x_sample, self.c_sample)
+        self.objective_model.fit(self.x_sample, self.f_sample)
+        pass
 
     def get_solution(self) -> np.ndarray:
         """
@@ -161,10 +172,15 @@ class BO_algo(object):
             1 x domain.shape[0] array containing the optimal solution of the problem
         """
 
-        constrained_samples = self.f
-        constrained_samples[self.c > self.c_th] = np.Inf
-        x_opt_ind = np.argmin(constrained_samples)
-        return self.x[x_opt_ind]
+        # among all solutions which fulfill the constraint c <= 0, return the best one
+
+        green_samples = self.f_sample
+        green_samples[self.c_sample > 0] = 1e6
+
+        x_opt = self.x_sample[np.argmin(green_samples)]
+
+        return x_opt
+        
 
 
 """ 
